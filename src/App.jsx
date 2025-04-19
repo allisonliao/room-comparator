@@ -1,98 +1,27 @@
 import React, { useState, useEffect } from "react";
 
-const STORAGE_KEY = "room_ranking_inference";
+const STORAGE_KEY = "room_elo_ranking_data";
+const DEFAULT_RATING = 1000;
+const K = 32; // elo sensitivity
 
-export default function RoomComparisonTool() {
-  const [rooms, setRooms] = useState([]); // room: { name, url }
-  const [graph, setGraph] = useState({}); // graph of preferences: { [roomName]: Set of losers }
-  const [pendingPairs, setPendingPairs] = useState([]);
+export default function RoomEloTool() {
+  const [rooms, setRooms] = useState([]); // room: { name, url, rating }
   const [currentPair, setCurrentPair] = useState(null);
-  const [sortedRooms, setSortedRooms] = useState(null);
+  const [history, setHistory] = useState([]);
   const [showRankings, setShowRankings] = useState(false);
 
   useEffect(() => {
-    const savedData = localStorage.getItem(STORAGE_KEY);
-    if (savedData) {
-      const { rooms, graph, pendingPairs, sortedRooms } = JSON.parse(savedData);
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const { rooms, history } = JSON.parse(saved);
       setRooms(rooms);
-      setGraph(graph);
-      setPendingPairs(pendingPairs);
-      setCurrentPair(pendingPairs[0] || null);
-      setSortedRooms(sortedRooms);
+      setHistory(history);
+      pickPair(rooms);
     }
   }, []);
 
-  const saveState = (data) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  };
-
-  const addComparison = (winner, loser, oldGraph) => {
-    const newGraph = { ...oldGraph };
-    if (!newGraph[winner.name]) newGraph[winner.name] = new Set();
-    newGraph[winner.name].add(loser.name);
-
-    if (newGraph[loser.name]) {
-      for (const node of newGraph[loser.name]) {
-        newGraph[winner.name].add(node);
-      }
-    }
-
-    for (const [node, beats] of Object.entries(newGraph)) {
-      if (beats.has(winner.name)) {
-        newGraph[node].add(loser.name);
-      }
-    }
-
-    // convert sets to arrays for serialization
-    const serializableGraph = {};
-    for (const [key, value] of Object.entries(newGraph)) {
-      serializableGraph[key] = Array.from(value);
-    }
-
-    return serializableGraph;
-  };
-
-  const canInferPreference = (a, b, graph) => {
-    const visited = new Set();
-    const stack = [a.name];
-    while (stack.length) {
-      const current = stack.pop();
-      if (current === b.name) return true;
-      for (const neighbor of graph[current] || []) {
-        if (!visited.has(neighbor)) {
-          visited.add(neighbor);
-          stack.push(neighbor);
-        }
-      }
-    }
-    return false;
-  };
-
-  const topologicalSort = (graph, allRooms) => {
-    const inDegree = {};
-    const nameToRoom = {};
-    for (const room of allRooms) {
-      nameToRoom[room.name] = room;
-      inDegree[room.name] = 0;
-    }
-    for (const beatList of Object.values(graph)) {
-      for (const loser of beatList) {
-        inDegree[loser]++;
-      }
-    }
-    const queue = Object.keys(inDegree).filter((k) => inDegree[k] === 0);
-    const sorted = [];
-    while (queue.length) {
-      const current = queue.shift();
-      sorted.push(nameToRoom[current]);
-      for (const neighbor of graph[current] || []) {
-        inDegree[neighbor]--;
-        if (inDegree[neighbor] === 0) {
-          queue.push(neighbor);
-        }
-      }
-    }
-    return sorted;
+  const saveState = (rooms, history) => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ rooms, history }));
   };
 
   const handleInput = (e) => {
@@ -102,97 +31,112 @@ export default function RoomComparisonTool() {
     const newRooms = lines
       .map((line) => line.split(","))
       .filter(([name, url]) => name && url)
-      .map(([name, url]) => ({ name: name.trim(), url: url.trim() }));
-
-    const allPairs = [];
-    for (let i = 0; i < newRooms.length; i++) {
-      for (let j = i + 1; j < newRooms.length; j++) {
-        allPairs.push([newRooms[i], newRooms[j]]);
-      }
-    }
+      .map(([name, url]) => ({ name: name.trim(), url: url.trim(), rating: DEFAULT_RATING }));
 
     setRooms(newRooms);
-    setGraph({});
-    setPendingPairs(allPairs);
-    setCurrentPair(allPairs[0] || null);
-    setSortedRooms(null);
-    saveState({ rooms: newRooms, graph: {}, pendingPairs: allPairs, sortedRooms: null });
+    setHistory([]);
+    pickPair(newRooms);
+    saveState(newRooms, []);
   };
 
-  const handleChoice = (preferred) => {
+  const expectedScore = (ratingA, ratingB) => {
+    return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
+  };
+
+  const updateRatings = (winner, loser) => {
+    const E_winner = expectedScore(winner.rating, loser.rating);
+    const E_loser = expectedScore(loser.rating, winner.rating);
+
+    const winnerNew = { ...winner, rating: winner.rating + K * (1 - E_winner) };
+    const loserNew = { ...loser, rating: loser.rating + K * (0 - E_loser) };
+
+    return [winnerNew, loserNew];
+  };
+
+  const pickPair = (roomList) => {
+    if (roomList.length < 2) return;
+    // sort by rating and pick two rooms with closest ratings randomly
+    const sorted = [...roomList].sort((a, b) => a.rating - b.rating);
+    let idx = Math.floor(Math.random() * (sorted.length - 1));
+    if (sorted.length > 5) idx = Math.floor(Math.random() * (sorted.length - 5));
+    const pair = [sorted[idx], sorted[idx + 1]];
+    setCurrentPair(pair);
+  };
+
+  const handleChoice = (chosen) => {
     const [a, b] = currentPair;
-    const winner = preferred;
-    const loser = a === preferred ? b : a;
+    const winner = chosen.name === a.name ? a : b;
+    const loser = chosen.name === a.name ? b : a;
 
-    const newGraph = addComparison(winner, loser, graph);
-
-    const remaining = pendingPairs.filter(([x, y]) => {
-      return !(canInferPreference(x, y, newGraph) || canInferPreference(y, x, newGraph));
+    const [newWinner, newLoser] = updateRatings(winner, loser);
+    const updatedRooms = rooms.map((r) => {
+      if (r.name === newWinner.name) return newWinner;
+      if (r.name === newLoser.name) return newLoser;
+      return r;
     });
 
-    const nextPair = remaining[0] || null;
-
-    setGraph(newGraph);
-    setPendingPairs(remaining);
-    setCurrentPair(nextPair);
-
-    if (!nextPair) {
-      const sorted = topologicalSort(newGraph, rooms);
-      setSortedRooms(sorted);
-      saveState({ rooms, graph: newGraph, pendingPairs: [], sortedRooms: sorted });
-    } else {
-      saveState({ rooms, graph: newGraph, pendingPairs: remaining, sortedRooms: null });
-    }
-  };
-
-  const handleExport = () => {
-    const csv = sortedRooms.map((r, i) => `${i + 1},${r.name},${r.url}`).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "room_rankings.csv";
-    link.click();
+    const newHistory = [...history, { winner: newWinner.name, loser: newLoser.name }];
+    setRooms(updatedRooms);
+    setHistory(newHistory);
+    pickPair(updatedRooms);
+    saveState(updatedRooms, newHistory);
   };
 
   const handleReset = () => {
     localStorage.removeItem(STORAGE_KEY);
     setRooms([]);
-    setGraph({});
-    setPendingPairs([]);
     setCurrentPair(null);
-    setSortedRooms(null);
+    setHistory([]);
     setShowRankings(false);
+  };
+
+  const handleExport = () => {
+    const csv = rooms
+      .sort((a, b) => b.rating - a.rating)
+      .map((r, i) => `${i + 1},${r.name},${r.url},${Math.round(r.rating)}`)
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "room_elo_rankings.csv";
+    link.click();
   };
 
   if (!rooms.length) {
     return (
       <form onSubmit={handleInput} style={{ padding: "1rem" }}>
         <h2 style={{ fontWeight: "bold", fontSize: "1.2rem" }}>Paste room data as CSV (Room Name,URL per line):</h2>
-        <textarea name="roomInput" rows={10} style={{ width: "100%", padding: "0.5rem", marginTop: "0.5rem" }} placeholder={`Room A,https://photos.app.goo.gl/link-here...\nRoom B,https://photos.app.goo.gl/link-here...`} />
-        <button type="submit" style={{ marginTop: "0.5rem", padding: "0.5rem 1rem" }}>Start Comparing</button>
+        <textarea
+          name="roomInput"
+          rows={10}
+          style={{ width: "100%", padding: "0.5rem", marginTop: "0.5rem" }}
+          placeholder={`Room A,https://photos.app.goo.gl/...\nRoom B,https://photos.app.goo.gl/...`}
+        />
+        <button type="submit" style={{ marginTop: "0.5rem", padding: "0.5rem 1rem" }}>
+          Start Ranking
+        </button>
       </form>
     );
   }
 
-  if (sortedRooms) {
+  if (showRankings) {
+    const sorted = [...rooms].sort((a, b) => b.rating - a.rating);
     return (
       <div style={{ padding: "1rem" }}>
-        <h2 style={{ fontWeight: "bold", fontSize: "1.5rem" }}>All comparisons complete!</h2>
-        <button onClick={() => setShowRankings(true)} style={{ marginRight: "0.5rem", padding: "0.5rem 1rem" }}>Show Rankings</button>
-        <button onClick={handleExport} style={{ marginRight: "0.5rem", padding: "0.5rem 1rem" }}>Export Rankings</button>
-        <button onClick={handleReset} style={{ padding: "0.5rem 1rem" }}>Reset</button>
-        {showRankings && (
-          <ol style={{ marginTop: "1rem" }}>
-            {sortedRooms.map((room, i) => (
-              <li key={i}>
-                <a href={room.url} target="_blank" rel="noopener noreferrer" style={{ color: "blue" }}>
-                  {room.name}
-                </a>
-              </li>
-            ))}
-          </ol>
-        )}
+        <h2 style={{ fontWeight: "bold", fontSize: "1.5rem" }}>Room Rankings (Elo Style)</h2>
+        <button onClick={() => setShowRankings(false)} style={{ marginBottom: "1rem" }}>
+          Back to Comparisons
+        </button>
+        <ol>
+          {sorted.map((room, i) => (
+            <li key={i}>
+              <a href={room.url} target="_blank" rel="noopener noreferrer">{room.name}</a> — {Math.round(room.rating)}
+            </li>
+          ))}
+        </ol>
+        <button onClick={handleExport} style={{ marginTop: "1rem" }}>Export Rankings</button>
+        <button onClick={handleReset} style={{ marginLeft: "0.5rem" }}>Reset</button>
       </div>
     );
   }
@@ -216,8 +160,12 @@ export default function RoomComparisonTool() {
           </div>
         ))}
       </div>
-      <p style={{ marginTop: "1rem", fontSize: "0.9rem", color: "gray" }}>Remaining comparisons: {pendingPairs.length}</p>
-      <button onClick={handleReset} style={{ marginTop: "1rem", padding: "0.5rem 1rem", width: "100%" }}>Reset</button>
+      <button onClick={() => setShowRankings(true)} style={{ marginTop: "1rem", padding: "0.5rem 1rem", width: "100%" }}>
+        View Rankings
+      </button>
+      <button onClick={handleReset} style={{ marginTop: "0.5rem", padding: "0.5rem 1rem", width: "100%" }}>
+        Reset
+      </button>
     </div>
   );
 }

@@ -188,6 +188,13 @@ export default function RoomComparisonTool() {
       <p style={{ marginTop: "1rem", fontSize: "0.9rem", color: "gray" }}>
         Remaining comparisons: {comparisonQueue.length}
       </p>
+
+      <button
+        onClick={handleReset}
+        style={{ marginTop: "1rem", padding: "0.5rem 1rem", width: "100%" }}
+      >
+        Reset
+      </button>
     </div>
   );
 }
